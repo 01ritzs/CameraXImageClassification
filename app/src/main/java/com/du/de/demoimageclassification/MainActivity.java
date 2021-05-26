@@ -29,7 +29,7 @@ public class MainActivity extends AppCompatActivity {
                 .build();
         ImageClassifier imageClassifier = null;
         try {
-            imageClassifier = ImageClassifier.createFromFileAndOptions(this, "flower.tflite", options);
+            imageClassifier = ImageClassifier.createFromFileAndOptions(this, "FlowerModel.tflite", options);
         } catch (IOException e) {
             e.printStackTrace();
         }
