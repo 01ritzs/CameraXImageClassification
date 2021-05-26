@@ -18,6 +18,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.RecyclerView
 import com.du.de.demoimageclassification.ml.FlowerModel
 import com.du.de.demoimageclassification.util.YuvToRgbConverter
 import org.tensorflow.lite.examples.classification.viewmodel.Recognition
@@ -34,19 +35,23 @@ private const val MAX_RESULT_DISPLAY = 3 // Maximum number of results displayed
 
 class CameraXActivity : AppCompatActivity() {
 
-    private var imageCapture: ImageCapture? = null
-
-    private lateinit var viewFinder: PreviewView
-    private lateinit var outputDirectory: File // Why is outputDirectory is used.
+    private lateinit var imageAnalyzer: ImageAnalysis // Analysis use case, for running ML code
+    private lateinit var camera: Camera
+    private lateinit var preview: Preview // Preview use case, fast, responsive view of the camera
     private lateinit var cameraExecutor: ExecutorService // Need of camera executor.
+
+    private val resultRecyclerView by lazy {
+        findViewById<RecyclerView>(R.id.recognitionResults) // Display the result of analysis
+    }
+    private val viewFinder by lazy {
+        findViewById<PreviewView>(R.id.viewFinder) // Display the preview image from Camera
+    }
 
     private val recogViewModel: RecognitionListViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_x_camera)
-        val button = findViewById<Button>(R.id.btn_camera_capture)
-        viewFinder = findViewById(R.id.viewFinder)
 
         // Request camera permissions
         if (allPermissionsGranted()) {
@@ -56,11 +61,6 @@ class CameraXActivity : AppCompatActivity() {
                 this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS
             )
         }
-
-        //  Set up the listener for take photo button
-        button.setOnClickListener { takePhoto() }
-
-        outputDirectory = getOutputDirectory()
 
         cameraExecutor = Executors.newSingleThreadExecutor()
     }
@@ -187,7 +187,7 @@ class CameraXActivity : AppCompatActivity() {
 
         override fun analyze(images: ImageProxy) {
 
-            val items = TensorImage.fromBitmap(toBitmap(images))
+            val items = mutableListOf<Recognition>()
 
             // TODO 2: Convert Image to Bitmap then to TensorImage
             val tfImage = TensorImage.fromBitmap(toBitmap(images))
