@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.util.Log
+import android.util.Size
 import android.widget.Button
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -21,6 +22,7 @@ import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.RecyclerView
 import com.du.de.demoimageclassification.ml.FlowerModel
 import com.du.de.demoimageclassification.util.YuvToRgbConverter
+import org.tensorflow.lite.examples.classification.ui.RecognitionAdapter
 import org.tensorflow.lite.examples.classification.viewmodel.Recognition
 import org.tensorflow.lite.examples.classification.viewmodel.RecognitionListViewModel
 import org.tensorflow.lite.support.image.TensorImage
@@ -31,7 +33,12 @@ import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
+private const val TAG = "TFL Classify" // Name for logging
 private const val MAX_RESULT_DISPLAY = 3 // Maximum number of results displayed
+private const val REQUEST_CODE_PERMISSIONS = 999 // Return code after asking for permission
+private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA) // permission needed
+
+typealias RecognitionListener = (recognition: List<Recognition>) -> Unit
 
 class CameraXActivity : AppCompatActivity() {
 
@@ -39,6 +46,7 @@ class CameraXActivity : AppCompatActivity() {
     private lateinit var camera: Camera
     private lateinit var preview: Preview // Preview use case, fast, responsive view of the camera
     private lateinit var cameraExecutor: ExecutorService // Need of camera executor.
+
 
     private val resultRecyclerView by lazy {
         findViewById<RecyclerView>(R.id.recognitionResults) // Display the result of analysis
@@ -48,6 +56,7 @@ class CameraXActivity : AppCompatActivity() {
     }
 
     private val recogViewModel: RecognitionListViewModel by viewModels()
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,7 +71,28 @@ class CameraXActivity : AppCompatActivity() {
             )
         }
 
-        cameraExecutor = Executors.newSingleThreadExecutor()
+        // Initialising the resultRecyclerView and its linked viewAdaptor
+        val viewAdapter = RecognitionAdapter(this)
+        resultRecyclerView.adapter = viewAdapter
+
+        // Disable recycler view animation to reduce flickering, otherwise items can move, fade in
+        // and out as the list change
+        resultRecyclerView.itemAnimator = null
+
+        // Attach an observer on the LiveData field of recognitionList
+        // This will notify the recycler view to update every time when a new list is set on the
+        // LiveData field of recognitionList.
+        recogViewModel.recognitionList.observe(this,
+            Observer {
+                viewAdapter.submitList(it)
+            }
+        )
+    }
+
+    private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
+        ContextCompat.checkSelfPermission(
+            baseContext, it
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     override fun onRequestPermissionsResult(
@@ -83,98 +113,41 @@ class CameraXActivity : AppCompatActivity() {
         }
     }
 
-    private fun takePhoto() {
-        // Get a stable reference of the modifiable image capture use case
-        val imageCapture = imageCapture ?: return
-
-        // Create time-stamped output file to hold the image
-        val photoFile = File(
-            outputDirectory,
-            SimpleDateFormat(
-                FILENAME_FORMAT, Locale.US
-            ).format(System.currentTimeMillis()) + ".jpg"
-        )
-
-        // Create output options object which contains file + metadata
-        val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
-
-        // Set up image capture listener, which is triggered after photo has
-        // been taken
-        imageCapture.takePicture(
-            outputOptions, ContextCompat.getMainExecutor(this), object : ImageCapture.OnImageSavedCallback {
-                override fun onError(exc: ImageCaptureException) {
-                    Log.e(TAG, "Photo capture failed: ${exc.message}", exc)
-                }
-
-                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    val savedUri = Uri.fromFile(photoFile)
-                    val msg = "Photo capture succeeded: $savedUri"
-                    Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
-                    Log.d(TAG, msg)
-                }
-            })
-    }
-
-
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
-        cameraProviderFuture.addListener({
+        cameraProviderFuture.addListener(Runnable {
             // Used to bind the lifecycle of cameras to the lifecycle owner
             val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
 
             // Preview
-            val preview = Preview.Builder()
+            preview = Preview.Builder()
                 .build()
-                .also {
-                    it.setSurfaceProvider(viewFinder.createSurfaceProvider()) // Check Surface provider
-                }
-            imageCapture = ImageCapture.Builder() // Check about ImageCapture.Builder class
+
+            imageAnalyzer = ImageAnalysis.Builder()
+                .setTargetResolution(Size(224, 224))
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build()
-            val imageAnalyzer = ImageAnalysis.Builder()
-                .build()
-                .also {
-                    it.setAnalyzer(cameraExecutor, ImageAnalysis(this) { items ->
+                .also { analysisUseCase: ImageAnalysis ->
+                    analysisUseCase.setAnalyzer(cameraExecutor, ImageAnalyzer(this) { items ->
                         recogViewModel.updateData(items)
-                    }
+                    })
                 }
+
             // Select back camera as a default
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+            val cameraSelector =
+                if (cameraProvider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA))
+                    CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA
             try {
                 // Unbind use cases before rebinding
                 cameraProvider.unbindAll()
                 // Bind use cases to camera
-                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageCapture, imageAnalyzer)
+                camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalyzer)
+                preview.setSurfaceProvider(viewFinder.surfaceProvider)
             } catch (exc: Exception) {
                 Log.e(TAG, "Use case binding failed", exc)
             }
         }, ContextCompat.getMainExecutor(this))
-    }
-
-    private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
-        ContextCompat.checkSelfPermission(
-            baseContext, it
-        ) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun getOutputDirectory(): File {
-        val mediaDir = externalMediaDirs.firstOrNull()?.let {
-            File(it, resources.getString(R.string.app_name)).apply { mkdirs() }
-        }
-        return if (mediaDir != null && mediaDir.exists())
-            mediaDir else filesDir
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        cameraExecutor.shutdown()
-    }
-
-    companion object {
-        private const val TAG = "CameraXBasic"
-        private const val FILENAME_FORMAT = "yyyy-MM-dd-HH-mm-ss-SSS"
-        private const val REQUEST_CODE_PERMISSIONS = 10
-        private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA)
     }
 
     private class ImageAnalyzer(ctx: Context, private val listener: RecognitionListener) :
